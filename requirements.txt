@@ -1,0 +1,11 @@
+streamlit
+joblib
+numpy
+pandas
+plotly
+matplotlib
+wordcloud
+streamlit-option-menu
+scikit-learn
+shap
+nltk
