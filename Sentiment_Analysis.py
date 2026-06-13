@@ -21,72 +21,6 @@ from streamlit_option_menu import option_menu
 
 warnings.filterwarnings("ignore")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PREPROCESSOR CLASS — top-level agar pickle bisa load dengan benar
-# ─────────────────────────────────────────────────────────────────────────────
-class Preprocessor:
-    def __init__(self, slangwords):
-        self.slangwords  = slangwords
-        self.kata_negasi = {
-            'tidak','tak','bukan','kurang','belum',
-            'jangan','tiada','tanpa','ga','gak',
-            'nggak','ndak','enggak','ogah'
-        }
-        # Stopwords di-cache sekali di __init__ → tidak di-load ulang tiap teks
-        import nltk
-        for pkg in ['punkt', 'punkt_tab', 'stopwords']:
-            nltk.download(pkg, quiet=True)
-        from nltk.corpus import stopwords as _sw
-        sw = set(_sw.words('indonesian')) | set(_sw.words('english'))
-        sw.update(['iya','yaa','nya','na','sih','ku','di','ya','gaa','loh','kah','woi','woii','woy'])
-        sw -= self.kata_negasi
-        self.stopwords = sw
-
-    def cleaning(self, text):
-        text = str(text)
-        text = re.sub(r'@[A-Za-z0-9]+', '', text)
-        text = re.sub(r'#[A-Za-z0-9]+', '', text)
-        text = re.sub(r'RT[\s]', '', text)
-        text = re.sub(r"http\S+", '', text)
-        text = re.sub(r'[0-9]+', '', text)
-        text = re.sub(r'[^\w\s]', '', text)
-        text = text.replace('\n', ' ')
-        text = text.translate(str.maketrans('', '', string.punctuation))
-        return text.strip()
-
-    def fix_slangwords(self, text):
-        return ' '.join([self.slangwords.get(w.lower(), w) for w in text.split()])
-
-    def spelling_correction(self, text):
-        return ' '.join([re.sub(r'(.)\1{2,}', r'\1', w) for w in text.split()])
-
-    def filtering(self, tokens):
-        return [t for t in tokens if t not in self.stopwords]
-
-    def handle_negation(self, tokens):
-        result, negate = [], False
-        for token in tokens:
-            if token in self.kata_negasi:
-                negate = True
-                result.append(token)
-            elif negate:
-                result.append('NEG_' + token)
-                negate = False
-            else:
-                result.append(token)
-        return result
-
-    def __call__(self, text):
-        text   = self.cleaning(text)
-        text   = text.lower()
-        text   = self.fix_slangwords(text)
-        text   = self.spelling_correction(text)
-        tokens = text.split()              # split() jauh lebih cepat dari word_tokenize
-        tokens = self.filtering(tokens)
-        tokens = self.handle_negation(tokens)
-        return ' '.join(tokens)
-
-
 def run_sentiment_app():
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -158,10 +92,9 @@ def run_sentiment_app():
 
     /* ── Section heading ──────────────────────────────────────── */
     .section-heading {
-        font-family: 'Syne', sans-serif; font-size: 0.82rem; font-weight: 700;
-        color: #64748B; letter-spacing: .06em; text-transform: uppercase;
+        font-family: 'Syne', sans-serif; font-size: 1.05rem; font-weight: 700;
+        color: #64748B; letter-spacing: .08em; text-transform: uppercase;
         margin: 28px 0 14px 0; display: flex; align-items: center; gap: 8px;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .section-heading::after {
         content:''; flex: 1; height: 1px;
@@ -424,13 +357,95 @@ def run_sentiment_app():
     "a","an","was","are","be","has","had","have","but","or","do","did","not",
     }
 
-    _state = {}  # shared container untuk preprocessor
+    # ── Preprocessing pipeline (identik dengan Colab) ──────────────────────
+    @st.cache_resource(show_spinner=False)
+    def load_slangwords():
+        try:
+            # Load dari file lokal, jauh lebih cepat
+            kamus_alay = pd.read_csv('kamus_alay.csv')
+            return dict(zip(kamus_alay['slang'].str.lower(), kamus_alay['formal']))
+        except Exception:
+            return {}
+
+    @st.cache_resource(show_spinner=False)
+    def load_nltk_resources():
+        for pkg in ['punkt', 'punkt_tab', 'stopwords']:
+            try:
+                nltk.download(pkg, quiet=True)
+            except Exception:
+                pass
+
+    load_nltk_resources()
+    _slangwords = load_slangwords()
+
+    KATA_NEGASI = {
+        'tidak', 'tak', 'bukan', 'kurang', 'belum',
+        'jangan', 'tiada', 'tanpa', 'ga', 'gak',
+        'nggak', 'ndak', 'enggak', 'ogah'
+    }
+
+    def _cleaning(text):
+        text = str(text)
+        text = re.sub(r'@[A-Za-z0-9]+', '', text)
+        text = re.sub(r'#[A-Za-z0-9]+', '', text)
+        text = re.sub(r'RT[\s]', '', text)
+        text = re.sub(r"http\S+", '', text)
+        text = re.sub(r'[0-9]+', '', text)
+        text = re.sub(r'[^\w\s]', '', text)
+        text = text.replace('\n', ' ')
+        text = text.translate(str.maketrans('', '', string.punctuation))
+        return text.strip()
+
+    def _casefolding(text):
+        return text.lower()
+
+    def _fix_slangwords(text):
+        words = text.split()
+        return ' '.join([_slangwords.get(w.lower(), w) for w in words])
+
+    def _spelling_correction(text):
+        words = str(text).split()
+        corrected = [re.sub(r'(.)\1{2,}', r'\1', w) for w in words]
+        return ' '.join(corrected)
+
+    def _tokenizing(text):
+        try:
+            return word_tokenize(text)
+        except Exception:
+            return text.split()
+
+    def _filtering(tokens):
+        try:
+            sw = set(stopwords.words('indonesian')) | set(stopwords.words('english'))
+        except Exception:
+            sw = set()
+        sw.update(['iya','yaa','nya','na','sih','ku','di','ya','gaa','loh','kah','woi','woii','woy'])
+        negation_words = {
+            'tidak','tak','bukan','belum','jangan','tanpa','tiada',
+            'gak','ga','nggak','ngga','enggak','ndak','nda','kagak','kurang'
+        }
+        sw = sw - negation_words
+        return [t for t in tokens if t not in sw]
+
+    def _handle_negation(tokens):
+        result = []
+        negate = False
+        for token in tokens:
+            if token in KATA_NEGASI:
+                negate = True
+                result.append(token)
+            elif negate:
+                result.append('NEG_' + token)
+                negate = False
+            else:
+                result.append(token)
+        return result
+
+    def _to_sentence(tokens):
+        return ' '.join(tokens)
 
     def clean_text(text: str) -> str:
-        prep = _state.get('preprocessor')
-        if prep is not None:
-            return prep(text)
-        return str(text).lower()
+        return preprocessor(text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -446,12 +461,22 @@ def run_sentiment_app():
 
     def apply_pipeline(texts: list[str], vectorizer, features, model) -> np.ndarray:
         X = vectorizer.transform(texts)
+        if features is not None:
+            if hasattr(features, "transform"):
+                X = features.transform(X)
+            elif isinstance(features, (np.ndarray, list)):
+                X = X[:, features]
         return model.predict(X)
 
     def apply_pipeline_proba(texts: list[str], vectorizer, features, model) -> np.ndarray | None:
         if not hasattr(model, "predict_proba"):
             return None
         X = vectorizer.transform(texts)
+        if features is not None:
+            if hasattr(features, "transform"):
+                X = features.transform(X)
+            elif isinstance(features, (np.ndarray, list)):
+                X = X[:, features]
         return model.predict_proba(X)
 
     LABEL_MAP = {
@@ -461,9 +486,7 @@ def run_sentiment_app():
     }
 
     @st.cache_data(show_spinner=False, ttl=300)
-    def load_data(_preprocessor=None):
-        # _preprocessor dipass dari luar agar cache key benar dan preprocessing
-        # tidak bergantung pada _state yang tidak bisa di-cache Streamlit.
+    def load_data():
         csv_path = "ulasan_aplikasi.csv"
         if not os.path.exists(csv_path):
             return None, None
@@ -473,12 +496,6 @@ def run_sentiment_app():
 
         POSSIBLE_TEXT = ["Review","review","content","text","ulasan","komentar","comment"]
         col_text = next((c for c in POSSIBLE_TEXT if c in df.columns), df.columns[0])
-
-        # Buat fungsi clean lokal yang pakai _preprocessor yang sudah pasti ada
-        def _clean(text: str) -> str:
-            if _preprocessor is not None:
-                return _preprocessor(text)
-            return str(text).lower()
 
         POSSIBLE_LABEL = ["sentiment","label","Sentiment","Label","sentimen","Sentimen"]
         col_label = next((c for c in POSSIBLE_LABEL if c in df.columns), None)
@@ -494,8 +511,7 @@ def run_sentiment_app():
         else:
             model_auto, vec_auto, feat_auto = load_model()
             if model_auto and vec_auto:
-                # Gunakan list comprehension — jauh lebih cepat dari .apply()
-                df["text_for_pred"] = [_clean(t) for t in df[col_text].astype(str)]
+                df["text_for_pred"] = df[col_text].astype(str).apply(clean_text)
                 preds = apply_pipeline(df["text_for_pred"].tolist(), vec_auto, feat_auto, model_auto)
                 df["sentiment"] = [LABEL_MAP.get(p, "neutral") for p in preds]
             else:
@@ -519,11 +535,9 @@ def run_sentiment_app():
             df["rating"] = df["sentiment"].map({"positive":5,"negative":2,"neutral":3})
 
         df = df.dropna(subset=[col_text]).copy()
-        # List comprehension menggantikan .apply() — ~2-3x lebih cepat untuk data besar
-        texts = df[col_text].astype(str).tolist()
-        df["text_clean"]   = [_clean(t) for t in texts]
-        df["char_length"]  = [len(t) for t in texts]
-        df["word_count"]   = [len(c.split()) for c in df["text_clean"]]
+        df["text_clean"]   = df[col_text].astype(str).apply(clean_text)
+        df["char_length"]  = df[col_text].astype(str).apply(len)
+        df["word_count"]   = df["text_clean"].str.split().apply(len)
         df["month"]        = df["date"].dt.to_period("M").astype(str)
         df["week"]         = df["date"].dt.isocalendar().week.astype(int)
         df["day_of_week"]  = df["date"].dt.day_name()
@@ -767,13 +781,13 @@ def run_sentiment_app():
                     "Executive Dashboard",
                     "Deep Analysis",
                     "Data Explorer",
-                    "AI Predictor",
+                    "AI Predictor"
                 ],
                 icons=[
                     "bar-chart-fill",
                     "graph-up-arrow",
                     "table",
-                    "robot",
+                    "robot"
                 ],
                 menu_icon="none",
                 default_index=0,
@@ -846,34 +860,44 @@ def run_sentiment_app():
 
             if st.button("⚡ Analisis Sentimen"):
                 if not user_text.strip():
+                    st.session_state["sidebar_pred"] = None
                     st.warning("Masukkan teks terlebih dahulu.")
                 elif model is None or vectorizer is None:
+                    st.session_state["sidebar_pred"] = None
                     st.error("Model belum dimuat. Periksa folder models/")
                 else:
                     cleaned   = clean_text(user_text)
                     preds     = apply_pipeline([cleaned], vectorizer, features, model)
                     sentiment = LABEL_MAP.get(preds[0], "neutral")
                     proba     = apply_pipeline_proba([cleaned], vectorizer, features, model)
+                    # Simpan hasil ke session_state agar tetap tampil setelah re-run
+                    st.session_state["sidebar_pred"] = {
+                        "sentiment": sentiment,
+                        "proba": proba[0].tolist() if proba is not None else None,
+                    }
 
-                    icons = {"positive": "🟢 POSITIVE", "negative": "🔴 NEGATIVE", "neutral": "⚪ NEUTRAL"}
-                    css   = {"positive": "pred-positive", "negative": "pred-negative", "neutral": "pred-neutral"}
-                    st.markdown(f'<div class="pred-result {css.get(sentiment,"pred-neutral")}">{icons.get(sentiment, sentiment)}</div>', unsafe_allow_html=True)
+            # Tampilkan hasil dari session_state — tetap muncul meski Streamlit re-run
+            if st.session_state.get("sidebar_pred"):
+                pred = st.session_state["sidebar_pred"]
+                sentiment = pred["sentiment"]
+                icons = {"positive": "🟢 POSITIVE", "negative": "🔴 NEGATIVE", "neutral": "⚪ NEUTRAL"}
+                css   = {"positive": "pred-positive", "negative": "pred-negative", "neutral": "pred-neutral"}
+                st.markdown(f'<div class="pred-result {css.get(sentiment,"pred-neutral")}">{icons.get(sentiment, sentiment)}</div>', unsafe_allow_html=True)
 
-                    if proba is not None:
-                        row = proba[0]
-                        for cls, prob in zip(["negative","neutral","positive"][:len(row)], row):
-                            pct = prob * 100
-                            if cls == "positive":
-                                bar_cls = "conf-fill-pos"
-                            elif cls == "neutral":
-                                bar_cls = "conf-fill-neut"
-                            else:
-                                bar_cls = "conf-fill-neg"
-                            st.markdown(f"""
-                            <div class="conf-bar-wrap">
-                            <div class="conf-label"><span>{cls.capitalize()}</span><span>{pct:.1f}%</span></div>
-                            <div class="conf-track"><div class="{bar_cls}" style="width:{pct}%"></div></div>
-                            </div>""", unsafe_allow_html=True)
+                if pred["proba"] is not None:
+                    for cls, prob in zip(["negative","neutral","positive"][:len(pred["proba"])], pred["proba"]):
+                        pct = prob * 100
+                        if cls == "positive":
+                            bar_cls = "conf-fill-pos"
+                        elif cls == "neutral":
+                            bar_cls = "conf-fill-neut"
+                        else:
+                            bar_cls = "conf-fill-neg"
+                        st.markdown(f"""
+                        <div class="conf-bar-wrap">
+                        <div class="conf-label"><span>{cls.capitalize()}</span><span>{pct:.1f}%</span></div>
+                        <div class="conf-track"><div class="{bar_cls}" style="width:{pct}%"></div></div>
+                        </div>""", unsafe_allow_html=True)
 
             st.markdown('<div class="section-heading">System Status</div>', unsafe_allow_html=True)
 
@@ -1125,145 +1149,6 @@ def run_sentiment_app():
                             with c:
                                 st.metric(cls.capitalize(), f"{p*100:.1f}%")
 
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    st.markdown('<div class="section-heading">🧠 Penjelasan Prediksi (XAI)</div>', unsafe_allow_html=True)
-
-                    has_proba_local = hasattr(model, "predict_proba")
-                    classes_local   = model.classes_ if hasattr(model, "classes_") else [0, 1, 2]
-                    feature_names_local = vectorizer.get_feature_names_out()
-
-                    # ── SHAP ──────────────────────────────────────────────
-                    with st.container():
-                        with st.spinner("Menghitung penjelasan SHAP…"):
-                            try:
-                                import shap
-
-                                X_local_s = vectorizer.transform([cleaned]).toarray()
-
-                                # Background butuh lebih dari 1 sampel agar LinearExplainer bisa
-                                # menghitung variance yang berarti; fallback ke zero background
-                                try:
-                                    df_bg = _state.get('df_bg')
-                                    if df_bg is not None and len(df_bg) > 10:
-                                        X_bg_s = vectorizer.transform(
-                                            df_bg["text_clean"].astype(str).sample(min(100, len(df_bg)), random_state=42)
-                                        ).toarray()
-                                    else:
-                                        X_bg_s = shap.maskers.Independent(X_local_s, max_samples=1)
-                                except Exception:
-                                    X_bg_s = X_local_s
-
-                                exp_local_s = shap.LinearExplainer(model, X_bg_s, feature_perturbation="interventional")
-                                sv_local_s  = exp_local_s.shap_values(X_local_s)
-
-                                fn_list_s = feature_names_local.tolist()
-                                pred_idx_s2 = list(classes_local).index(preds[0]) if preds[0] in list(classes_local) else 0
-
-                                sv_cls_s = sv_local_s[pred_idx_s2] if isinstance(sv_local_s, list) else (
-                                    sv_local_s[:, :, pred_idx_s2] if sv_local_s.ndim == 3 else sv_local_s
-                                )
-                                sv_flat_s = sv_cls_s[0]
-
-                                nz_idx = np.where(sv_flat_s != 0)[0]
-                                top_n_s = min(10, len(nz_idx)) if len(nz_idx) > 0 else 0
-
-                                if top_n_s > 0:
-                                    sorted_idx = nz_idx[np.argsort(np.abs(sv_flat_s[nz_idx]))[-top_n_s:][::-1]]
-                                    top_words_s = [fn_list_s[j] for j in sorted_idx]
-                                    top_vals_s  = sv_flat_s[sorted_idx]
-                                    bar_colors_w = [COLOR_POS if v > 0 else COLOR_NEG for v in top_vals_s]
-
-                                    col_chart2, col_card2 = st.columns([1.4, 1])
-
-                                    with col_chart2:
-                                        fig_shap_s = go.Figure(go.Bar(
-                                            x=top_vals_s[::-1],
-                                            y=top_words_s[::-1],
-                                            orientation="h",
-                                            marker=dict(color=bar_colors_w[::-1], opacity=0.85, line=dict(width=0)),
-                                            hovertemplate="<b>%{y}</b><br>SHAP: %{x:.4f}<extra></extra>",
-                                        ))
-                                        fig_shap_s.add_vline(x=0, line_width=1, line_dash="dash", line_color="#475569")
-                                        fig_shap_s.update_layout(
-                                            **plotly_layout(),
-                                            title=f"SHAP — Kontribusi Kata terhadap {sentiment.upper()}",
-                                            height=380,
-                                            xaxis=dict(showgrid=True, gridcolor="#E2E8F0", title="SHAP value"),
-                                            yaxis=dict(showgrid=False, tickfont=dict(size=12)),
-                                            bargap=0.25,
-                                        )
-                                        st.plotly_chart(fig_shap_s, use_container_width=True)
-
-                                    with col_card2:
-                                        # Mini table bersebelahan dengan grafik
-                                        rows_html2 = ""
-                                        for w, v in zip(top_words_s, top_vals_s):
-                                            pengaruh = "✅ Mendukung" if v > 0 else "❌ Menentang"
-                                            color_val = "#10B981" if v > 0 else "#EF4444"
-                                            rows_html2 += f"""
-                                            <tr>
-                                                <td style="padding:5px 10px;font-size:0.78rem;color:#0F172A;">{w}</td>
-                                                <td style="padding:5px 10px;font-size:0.78rem;color:{color_val};font-weight:600;font-family:'DM Mono',monospace;">{v:+.4f}</td>
-                                                <td style="padding:5px 10px;font-size:0.78rem;color:{color_val};">{pengaruh}</td>
-                                            </tr>"""
-                                        st.markdown(f"""
-                                        <div style="background:#FFFFFF;border:1px solid #E2E8F0;border-radius:12px;
-                                        overflow:hidden;box-shadow:0 1px 4px rgba(37,99,235,0.05);">
-                                            <table style="width:100%;border-collapse:collapse;">
-                                                <thead>
-                                                    <tr style="background:#F8FAFC;border-bottom:1px solid #E2E8F0;">
-                                                        <th style="padding:7px 10px;font-size:0.72rem;color:#94A3B8;font-weight:600;text-align:left;letter-spacing:.06em;text-transform:uppercase;">Kata</th>
-                                                        <th style="padding:7px 10px;font-size:0.72rem;color:#94A3B8;font-weight:600;text-align:left;letter-spacing:.06em;text-transform:uppercase;">SHAP</th>
-                                                        <th style="padding:7px 10px;font-size:0.72rem;color:#94A3B8;font-weight:600;text-align:left;letter-spacing:.06em;text-transform:uppercase;">Pengaruh</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>{rows_html2}</tbody>
-                                            </table>
-                                        </div>
-                                        """, unsafe_allow_html=True)
-
-                                    # Ringkasan Penjelasan — full row di bawah grafik + tabel
-                                    push_words = [w for w, v in zip(top_words_s, top_vals_s) if v > 0][:5]
-                                    pull_words = [w for w, v in zip(top_words_s, top_vals_s) if v < 0][:5]
-
-                                    narrative_parts2 = []
-                                    if push_words:
-                                        narrative_parts2.append(
-                                            f"Kata <strong>{', '.join(push_words)}</strong> punya pengaruh paling besar "
-                                            f"dalam mendorong prediksi menjadi <strong>{sentiment.upper()}</strong>. "
-                                            f"Semakin panjang batangnya, semakin kuat pengaruh kata tersebut."
-                                        )
-                                    if pull_words:
-                                        narrative_parts2.append(
-                                            f"Sebaliknya, kata <strong>{', '.join(pull_words)}</strong> justru \"menahan\" "
-                                            f"prediksi dari kelas {sentiment.upper()} — tapi pengaruhnya kalah kuat."
-                                        )
-                                    if not push_words and not pull_words:
-                                        narrative_parts2.append(
-                                            "SHAP tidak menemukan kata dengan pengaruh yang cukup signifikan. "
-                                            "Coba masukkan ulasan yang lebih panjang dan deskriptif."
-                                        )
-
-                                    narrative_text2 = " ".join(narrative_parts2)
-
-                                    st.markdown(f"""
-                                    <div style="background:#FFFFFF;border:1px solid #E2E8F0;border-radius:14px;
-                                    padding:18px 20px;box-shadow:0 1px 6px rgba(37,99,235,0.06);margin-top:16px;">
-                                        <div style="font-family:'DM Sans',sans-serif;font-weight:700;font-size:0.85rem;
-                                        color:#0F172A;margin-bottom:10px;">📝 Ringkasan Penjelasan</div>
-                                        <div style="font-size:0.88rem;color:#475569;line-height:1.7;">
-                                        {narrative_text2}
-                                        </div>
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                                else:
-                                    st.info("Tidak ada kontribusi kata yang signifikan dari SHAP untuk ulasan ini.")
-
-                            except ImportError:
-                                st.error("❌ Library SHAP belum terinstall. Jalankan: `pip install shap`")
-                            except Exception as e:
-                                st.error(f"❌ Error saat menjalankan SHAP: {e}")
-
         with tab_batch:
             st.markdown("Upload CSV dengan kolom bernama **`Review`**, **`text`**, **`content`**, atau **`ulasan`**.")
             uploaded = st.file_uploader("Pilih file CSV", type=["csv"])
@@ -1306,25 +1191,18 @@ def run_sentiment_app():
                                     mime="text/csv")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 13. MAIN
+# 12. MAIN
 # ─────────────────────────────────────────────────────────────────────────────
     def main_logic():
-        model, vectorizer, preprocessor = load_model()
-        _state['preprocessor'] = preprocessor
-        # Pass preprocessor langsung agar load_data tidak bergantung pada _state
-        # dan cache Streamlit bekerja dengan benar
-        df_raw, col_text  = load_data(_preprocessor=preprocessor)
+        model, vectorizer, features = load_model()
+        df_raw, col_text  = load_data()
 
         if df_raw is None:
             st.error("⚠️  **ulasan_aplikasi.csv** tidak ditemukan. Pastikan file ada di root folder CHURNGUARD/")
             st.info("Kolom yang diharapkan: kolom teks ulasan (nama apapun) + opsional: sentiment, date, rating")
             st.stop()
 
-        # Simpan background data untuk SHAP di AI Predictor
-        if "text_clean" in df_raw.columns:
-            _state['df_bg'] = df_raw.dropna(subset=["text_clean"])
-
-        page, sel_month, sentiments, wc_range = render_sidebar(model, vectorizer, None, df_raw, col_text)
+        page, sel_month, sentiments, wc_range = render_sidebar(model, vectorizer, features, df_raw, col_text)
 
         df = df_raw.copy()
         if sel_month != "All":
@@ -1346,6 +1224,6 @@ def run_sentiment_app():
         elif page == "Data Explorer":
             page_data_explorer(df, col_text)
         elif page == "AI Predictor":
-            page_ai_predictor(model, vectorizer, None)
+            page_ai_predictor(model, vectorizer, features)
 
     main_logic()
